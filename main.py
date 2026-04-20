@@ -15,12 +15,24 @@ import re
 from selenium.webdriver.common.by import By
 from selenium.common.exceptions import NoSuchElementException
 from collections import defaultdict
+import argparse
 
 # Section 1: Config
 # Define objects and functions and settings.
 
+
+parser = argparse.ArgumentParser(description= "A simple script to setup a markdown notes file with a patients retreived from Canopy.")
+parser.add_argument("-v", "--verbose", action="store_true", help="Increase output shell for debugging.")
+parser.add_argument("-p", "--provider", type=str)
+args = parser.parse_args
+#TO DO: add custom date handling
+
 debug = False # Enables verbose output for debugging purposes. Set to False for production use.
 testing = False # Enables custom chrome options for testing. Currently not working. Does not appear to affect normal functionality.
+
+if args.verbose == True:
+    debug = True
+
 if testing == True: # Experimenting with chrome options to enable pesistence and headless PDF downloading. Currently NOT working.
     chrome_options = webdriver.ChromeOptions()
     prefs = {
@@ -55,7 +67,8 @@ class LabResult: #Lab data class
     def __repr__(self):
         return f"Lab(Name='{self.shortened_name}', Value={self.value}, Date={self.date})"
 
-    
+
+
 def login(): #Initialize Canopy. Required once each time the script is run. User must manually log in. 
     driver.get("https://onecanopy.oakstreethealth.com/#/tracker")  # Opens canopy tracker page
     sleep(3)  # Wait for page to load
@@ -80,20 +93,22 @@ def get_schedule(provider): #Scrapes appointment data from the main tracker page
                 EC.presence_of_element_located((By.XPATH, "/html/body/div[1]/div/div/div/main/div/div/div[2]/header/div/button[1]"))
             )
 
-            sleep(5) #Allow time for user input
+            #sleep(5) #Allow time for user input
+            if provider == "":
+                TO = 60
+            else:
+                button = driver.find_element(By.XPATH, "/html/body/div[1]/div/div/div/main/div/div/div[2]/header/div/button[1]")
+                button.click()
 
-            button = driver.find_element(By.XPATH, "/html/body/div[1]/div/div/div/main/div/div/div[2]/header/div/button[1]")
-            button.click()
-
-            WebDriverWait(driver, TO).until(
-                EC.presence_of_element_located((By.ID, "provider-filter-autocomplete"))
-            )
-            provider_field = driver.find_element(By.ID, "provider-filter-autocomplete")
-            provider_field.send_keys(provider)  # Set the provider field
-            sleep(3)  # Wait for the input to be processed
-            #suboptimal, better to wait for provider name to appear in the dropdown
-            keyboard.send(keyboard.KEY_DOWN)
-            keyboard.send('enter')  # Simulate pressing Enter to apply the filter
+                WebDriverWait(driver, TO).until(
+                    EC.presence_of_element_located((By.ID, "provider-filter-autocomplete"))
+                )
+                provider_field = driver.find_element(By.ID, "provider-filter-autocomplete")
+                provider_field.send_keys(provider)  # Set the provider field
+                sleep(3)  # Wait for the input to be processed
+                #suboptimal, better to wait for provider name to appear in the dropdown
+                keyboard.send(keyboard.KEY_DOWN)
+                keyboard.send('enter')  # Simulate pressing Enter to apply the filter
 
             WebDriverWait(driver, TO).until(
                 EC.presence_of_element_located((By.CLASS_NAME, "schedule-view-default-tr"))
@@ -454,7 +469,10 @@ def get_last_note(patient_id):
         return ""
 
 if __name__ == "__main__":
-    provider = tk.simpledialog.askstring("Input", "Enter provider name (e.g. 'Smith J'):")
+    if args.provider:
+        provider = args.provider
+    else:
+        provider = tk.simpledialog.askstring("Input", "Enter provider name, leave blank to handle manually:")
     login()
     schedule_data = get_schedule(provider)
     pts = parse_appointment_data(schedule_data)
