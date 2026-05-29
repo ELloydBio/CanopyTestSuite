@@ -1,30 +1,37 @@
-import tkinter as tk
-from tkinter import ttk
-import keyboard
+#Section 0: Imports
+#Basic functions
 import pyperclip
 from time import sleep
-import re
+import argparse
+from collections import defaultdict
+
+#WebUI handling
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-import pyautogui as pya
-import os
-import labs
-import re
-from selenium.webdriver.common.by import By
 from selenium.common.exceptions import NoSuchElementException
-from collections import defaultdict
-import argparse
+
+#UI automation
+import pyautogui as pya
+from tkinter import simpledialog
+import keyboard
+
+#data management
+import os
+import re
+import datetime
+
 
 # Section 1: Config
 # Define objects and functions and settings.
 
-
 parser = argparse.ArgumentParser(description= "A simple script to setup a markdown notes file with a patients retreived from Canopy.")
 parser.add_argument("-v", "--verbose", action="store_true", help="Increase output shell for debugging.")
-parser.add_argument("-p", "--provider", type=str)
-args = parser.parse_args
+parser.add_argument("-p", "--provider", type=str, help="Enter provider name to filter schedule. If left blank, provider must be entered manually via GUI or Canopy.")
+parser.add_argument("-f", "--fast", action="store_true", help="Skip copying notes.")
+parser.add_argument("-s", "--solo", type=str, help="Enter patient ID to parse only 1 patient.")
+args = parser.parse_args()
 #TO DO: add custom date handling
 
 debug = False # Enables verbose output for debugging purposes. Set to False for production use.
@@ -46,6 +53,9 @@ if testing == True: # Experimenting with chrome options to enable pesistence and
 else:
     driver = webdriver.Chrome()
 
+wait = WebDriverWait(driver, 15) 
+
+
 class patient: #Patient data class
     def __init__(self, patient_id, name="", time=""):
         self.patient_id = patient_id
@@ -53,6 +63,7 @@ class patient: #Patient data class
         self.time = time
         self.labs = []
         self.note = ""
+        self.DOB = datetime.date(1900, 1, 1)  # Default DOB
     
     def __repr__(self):
         return f"{self.time} {self.name} (ID: {self.patient_id})"
@@ -81,7 +92,7 @@ def login(): #Initialize Canopy. Required once each time the script is run. User
         print(f"Login failed: {e}")
         raise Exception("Login failed. Please check your credentials or the page structure.")
     sleep(5)
-    
+
 def get_schedule(provider): #Scrapes appointment data from the main tracker page. Returns raw text data for parsing.
     try:
         TO = 10  # int timeout in seconds, higher for debugging lower for production
@@ -155,22 +166,6 @@ def parse_appointment_data(data_string):
             # Split the name by spaces and filter out empty strings
             name_parts = [part for part in full_extracted_name.split(' ') if part]
 
-            # Special handling for "Pooja Jaisingh..." if it's at the beginning of the extracted name
-            if name_parts and name_parts[0] == 'Pooja' and len(name_parts) > 1 and name_parts[1].startswith('Jaisingh'):
-                # If "Pooja Jaisingh..." is detected, we'll try to find the actual patient name after it.
-                # This is a heuristic based on your provided data structure.
-                # We'll skip "Pooja Jaisingh..." and then take the last two words.
-                # Find the index where the actual patient name likely starts
-                try:
-                    jaisingh_index = name_parts.index('Jaisingh...') # Adjust if 'Jaisingh' only
-                    if jaisingh_index + 1 < len(name_parts):
-                        name_parts = name_parts[jaisingh_index + 1:] # Slice from after "Jaisingh..."
-                    else:
-                        name_parts = [] # No patient name found after "Pooja Jaisingh..."
-                except ValueError:
-                    # 'Jaisingh...' not found, proceed with original name_parts
-                    pass
-
             # If after cleanup, there are still parts, take the last two
             if len(name_parts) >= 2:
                 final_name = ' '.join(name_parts[-2:])
@@ -193,6 +188,32 @@ def parse_appointment_data(data_string):
     return pt_list
     
 
+def update_patient_info(patient):
+
+
+    url = f"https://onecanopy.oakstreethealth.com/#/charts/{patient.patient_id}/labs"
+    print(f"Navigating to: {url}")
+    driver.get(url)
+    sleep(2)  # Initial wait for the page to load
+
+    try:
+        # Wait for and extract patient full name
+        wait.until(EC.presence_of_element_located([By.CLASS_NAME, "patient-full-name"]))
+        name_element = driver.find_element(By.CLASS_NAME, "patient-full-name")
+        patient.name = name_element.text.strip()
+        
+        # Wait for and extract patient date of birth
+        wait.until(EC.presence_of_element_located([By.CSS_SELECTOR, "[data-cy='patient-date-of-birth']"]))
+        dob_element = driver.find_element(By.CSS_SELECTOR, "[data-cy='patient-date-of-birth']")
+        dob_text = dob_element.text.strip()
+        patient.DOB = datetime.datetime.strptime(dob_text, "%m/%d/%Y").date()
+        if "No results found" in driver.page_source:
+            print("No labs found.")
+            patient.labs = "No labs found."
+        print(f"  Name: {patient.name}, DOB: {patient.DOB}")
+    except Exception as e:
+        print(f"  Error retrieving data for patient {patient.patient_id}: {e}")
+    return patient 
 
 def get_most_recent_labs(patient_id):
     """
@@ -204,15 +225,15 @@ def get_most_recent_labs(patient_id):
     url = f"https://onecanopy.oakstreethealth.com/#/charts/{patient_id}/labs"
     print(f"Navigating to: {url}")
     driver.get(url)
-
+    sleep(2)  # Initial wait for the page to start loading
+    
     try:
         # 1. Wait for the main container to ensure the view has loaded.
         # Waiting for 'tr' can be flaky if the table is empty or reloading.
-        WebDriverWait(driver, 20).until(
+        wait.until(
             EC.visibility_of_element_located((By.CSS_SELECTOR, ".labs-card"))
         )
-        # Small buffer to allow the table rows to settle after the container appears
-        sleep(2) 
+    
     except Exception as e:
         print(f"Failed to load patient labs page for {patient_id}: {e}")
         return []
@@ -309,49 +330,11 @@ def format_labs_to_panels(lab_objects):
     Takes a list of LabResult objects and formats them into grouped, 
     human-readable text panels sorted by date.
     """
-    
-    # --- 1. CONFIGURATION ---
-    # Map specific text found in LabResult.name to a clean output label.
-    # Order matters: more specific matches should be higher if there's overlap.
-    NAME_MAPPINGS = {
-        'Cholesterol, Total': 'Chol',
-        'Triglycerides': 'TGC',
-        'HDL': 'HDL',
-        'LDL': 'LDL',
-        'Sodium': 'Na',
-        'Potassium': 'K',
-        'Glucose': 'Glu',
-        'Creatinine': 'Creat',
-        'eGFR': 'GFR',
-        'WBC': 'WBC',
-        'Hemoglobin': 'HGB', # Watch out for 'Hemoglobin A1c' matching this
-        'Hematocrit': 'HCT',
-        'PLATELET': 'Plts',
-        'MCV': 'MCV',
-        'Hemoglobin A1c': 'A1c',
-        'TSH': 'TSH',
-        'PSA': 'PSA',
-        'Vitamin D': 'Vit D',
-        'AST - Aspartate Aminotransferase': 'AST',
-        'ALT - Alanine Aminotransferase': 'ALT',
-        'Alkaline Phosphatase': 'Alk Phos',
-    }
 
-    # Define what constitutes a "Panel" and the order of fields
-    PANEL_DEFINITIONS = {
-        "Lipid Panel": ["Chol", "HDL", "LDL", "TGC"],
-        "BMP": ["Na", "K", "Glu"],
-        "Kidney function tests": ["Creat", "GFR"],
-        "CBC": ["WBC", "HGB", "MCV", "Plts"],
-        "Diabetes labs": ["A1c"],
-        "Thyroid labs": ["TSH"],
-        "LFTs": ["AST", "ALT", "Alk Phos"],
-        "PSA": ["PSA"],
-        "Other": ["Vit D"]
-    }
+    import labpanels
+    NAME_MAPPINGS = labpanels.NAME_MAPPINGS
+    PANEL_DEFINITIONS = labpanels.PANEL_DEFINITIONS
 
-    # --- 2. GROUPING DATA ---
-    # Structure: data_by_date['11/13/2025']['Na'] = "138.0"
     data_by_date = defaultdict(dict)
 
     for lab in lab_objects:
@@ -427,14 +410,10 @@ def get_last_note(patient_id):
             
             # Search for your keywords anywhere in the row string
             if "History and Physical" in row_content or "Progress Note" in row_content:
-                # Find all cells in THIS row
                 cells = row.find_elements(By.TAG_NAME, "td")
                 
                 if len(cells) >= 3:
-                    # Capture the date before clicking
                     date = cells[0].text
-                    
-                    # Click the cell that contains the document link (usually cells[2])
                     cells[2].click()
                     sleep(2)  # Wait for document to load
                     
@@ -449,7 +428,7 @@ def get_last_note(patient_id):
             if pdf_url: #Logic to extract text from PDF via clipboard
                 driver.get(pdf_url)
                 sleep(2)  # Wait for PDF to load
-                pya.click(x=400, y=300)  # Click to focus on the PDF viewer
+                pya.click(x=500, y=300)  # Click to focus on the PDF viewer
                 sleep(0.5)  # Wait for focus
                 keyboard.press_and_release('ctrl+a')
                 sleep(0.5)  # Wait for selection to complete
@@ -464,6 +443,7 @@ def get_last_note(patient_id):
             else:
                 print(f"No matching document found for patient {patient_id}.")
                 return ""
+
     except Exception as e:
         print(f"Error extracting text from PDF for patient {patient_id}: {e}")
         return ""
@@ -471,20 +451,32 @@ def get_last_note(patient_id):
 if __name__ == "__main__":
     if args.provider:
         provider = args.provider
+    elif args.solo:
+        provider = "" # Provider not needed for solo patient parsing
     else:
-        provider = tk.simpledialog.askstring("Input", "Enter provider name, leave blank to handle manually:")
+        provider = simpledialog.askstring("Input", "Enter provider name, leave blank to handle manually:")
+
     login()
-    schedule_data = get_schedule(provider)
-    pts = parse_appointment_data(schedule_data)
-    debug = True
+
+    if not args.solo:
+        schedule_data = get_schedule(provider)
+        pts = parse_appointment_data(schedule_data)
+    else:
+        pt = patient(args.solo, "", "")
+        pts = [pt]
+    
     paste_data = ""
     for pt in pts:
+        pt = update_patient_info(pt)
         labs = get_most_recent_labs(pt.patient_id)
         if debug == True:
             print(labs)
         labs_text = format_labs_to_panels(labs)
         pt.labs = labs_text
-        pt.note = get_last_note(pt.patient_id)
+        if args.fast:
+            print("Note copying skipped in fast mode.")
+        else:
+            pt.note = get_last_note(pt.patient_id)
         if debug == True:
             print(f"labs_text: \n{labs_text}")
         paste_data += "- [ ] " + pt.__repr__() + "\n\t- [ ] labs \n"
@@ -492,7 +484,10 @@ if __name__ == "__main__":
             paste_data += labs_text + "\n"
         if pt.note:
             paste_data += "\t- [ ] Note:\n" + pt.note + "\n\n"
+        else:
+            paste_data += "\n"
     pyperclip.copy(paste_data)
+
     with open("output.md", "w", encoding="utf-8") as f:
         f.write(paste_data)
     print("Final clipboard data:\n" + paste_data)
